@@ -1,38 +1,9 @@
 import { NextResponse } from "next/server";
 import type { PlanDuration } from "@/types/plan";
+import { getSuggestionProvider } from "@/lib/ai/provider";
+import { SuggestionProviderError, type ActivitySuggestion, type SuggestionInput } from "@/lib/ai/types";
 
 export const runtime = "nodejs";
-
-interface SuggestionInput {
-  goal: string;
-  duration: PlanDuration;
-  activities: string[];
-}
-
-interface ActivitySuggestion {
-  name: string;
-  description: string;
-}
-
-const responseSchema = {
-  type: "object",
-  additionalProperties: false,
-  properties: {
-    suggestions: {
-      type: "array",
-      items: {
-        type: "object",
-        additionalProperties: false,
-        properties: {
-          name: { type: "string" },
-          description: { type: "string" },
-        },
-        required: ["name", "description"],
-      },
-    },
-  },
-  required: ["suggestions"],
-} as const;
 
 function errorResponse(status: number) {
   return NextResponse.json({ error: "COULD NOT GENERATE SUGGESTIONS" }, { status });
@@ -51,7 +22,7 @@ function parseInput(value: unknown): SuggestionInput | null {
   if (input.activities.some((activity) => typeof activity !== "string" || activity.length > 80)) return null;
   return {
     goal: input.goal.trim(),
-    duration: input.duration,
+    duration: input.duration as PlanDuration,
     activities: input.activities.map((activity) => (activity as string).trim()).filter(Boolean),
   };
 }
@@ -86,61 +57,44 @@ export async function POST(request: Request) {
   const input = parseInput(body);
   if (!input) return errorResponse(400);
 
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) return errorResponse(503);
+  let provider;
+  try {
+    provider = getSuggestionProvider();
+  } catch (error) {
+    if (error instanceof SuggestionProviderError) {
+      console.warn(`[suggestions] provider configuration error; category=${error.category}`);
+      return errorResponse(error.status);
+    }
+    console.warn("[suggestions] provider initialization failed");
+    return errorResponse(500);
+  }
+
+  console.info(`[suggestions] provider=${provider.name}; model=${provider.model}; api_key_present=${provider.isConfigured ? "yes" : "no"}`);
+  if (!provider.isConfigured) {
+    console.warn(`[suggestions] provider=${provider.name}; category=missing_api_key`);
+    return errorResponse(503);
+  }
 
   try {
-    const response = await fetch("https://api.openai.com/v1/responses", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
-      },
-      signal: AbortSignal.timeout(30_000),
-      body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        max_output_tokens: 1200,
-        input: [
-          {
-            role: "system",
-            content: "Generate practical, measurable, yes-or-no activities for a personal habit tracker. Return 4 to 8 concise suggestions that directly support the goal and fit the plan duration. Prefer specific actions with clear completion criteria. Do not repeat or rephrase existing activities. Keep descriptions brief and optional. Return only the requested structured JSON.",
-          },
-          {
-            role: "user",
-            content: JSON.stringify({ goal: input.goal, durationDays: input.duration, existingActivities: input.activities }),
-          },
-        ],
-        text: {
-          format: {
-            type: "json_schema",
-            name: "track_activity_suggestions",
-            strict: true,
-            schema: responseSchema,
-          },
-        },
-      }),
-    });
-
-    if (!response.ok) return errorResponse(response.status === 429 ? 429 : 502);
-    const payload = await response.json() as {
-      output_text?: unknown;
-      output?: Array<{ content?: Array<{ type?: string; text?: string }> }>;
-    };
-    const outputText = typeof payload.output_text === "string"
-      ? payload.output_text
-      : payload.output?.flatMap((item) => item.content ?? []).find((item) => item.type === "output_text")?.text;
-    if (!outputText) return errorResponse(502);
-
+    const rawOutput = await provider.generate(input);
     let generated: unknown;
     try {
-      generated = JSON.parse(outputText);
+      generated = JSON.parse(rawOutput);
     } catch {
+      console.warn(`[suggestions] provider=${provider.name}; structured_json_parse=failure`);
       return errorResponse(502);
     }
+
     const suggestions = parseSuggestions(generated, input.activities);
+    console.info(`[suggestions] provider=${provider.name}; structured_json_parse=${suggestions ? "success" : "failure"}`);
     if (!suggestions) return errorResponse(502);
     return NextResponse.json({ suggestions });
-  } catch {
+  } catch (error) {
+    if (error instanceof SuggestionProviderError) {
+      console.warn(`[suggestions] provider=${provider.name}; upstream_status=${error.status}; category=${error.category}`);
+      return errorResponse(error.status >= 400 && error.status <= 599 ? error.status : 502);
+    }
+    console.warn(`[suggestions] provider=${provider.name}; unexpected_failure`);
     return errorResponse(502);
   }
 }

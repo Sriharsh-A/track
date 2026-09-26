@@ -18,9 +18,6 @@ function describeAuthError(error: { message?: string; code?: string; status?: nu
 function FormContent({ mode }: { mode: "login" | "signup" }) {
   const router = useRouter();
   const searchParams = useSearchParams();
-  const [email, setEmail] = useState("");
-  const [password, setPassword] = useState("");
-  const [confirmPassword, setConfirmPassword] = useState("");
   const [pending, setPending] = useState(false);
   const [error, setError] = useState("");
   const [notice, setNotice] = useState("");
@@ -28,14 +25,18 @@ function FormContent({ mode }: { mode: "login" | "signup" }) {
 
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
+    const formData = new FormData(event.currentTarget);
+    const submittedEmail = String(formData.get("email") ?? "").trim();
+    const submittedPassword = String(formData.get("password") ?? "");
+    const submittedConfirmPassword = String(formData.get("confirmPassword") ?? "");
     setError("");
     setNotice("");
-    if (mode === "signup" && password !== confirmPassword) {
+    if (mode === "signup" && submittedPassword !== submittedConfirmPassword) {
       setError("PASSWORDS DO NOT MATCH.");
       return;
     }
     if (!configured) {
-      setError("SUPABASE IS NOT CONFIGURED. ADD THE PROJECT URL AND ANON KEY TO .ENV.LOCAL.");
+      setError("SUPABASE IS NOT CONFIGURED. ADD THE PROJECT URL AND PUBLISHABLE KEY TO .ENV.LOCAL.");
       return;
     }
     setPending(true);
@@ -43,8 +44,8 @@ function FormContent({ mode }: { mode: "login" | "signup" }) {
       const supabase = createClient();
       if (mode === "signup") {
         const { data, error: signUpError } = await supabase.auth.signUp({
-          email: email.trim(),
-          password,
+          email: submittedEmail,
+          password: submittedPassword,
           options: { emailRedirectTo: `${window.location.origin}/auth/callback` },
         });
         if (signUpError) throw signUpError;
@@ -55,8 +56,11 @@ function FormContent({ mode }: { mode: "login" | "signup" }) {
         if (data.session) router.replace("/dashboard");
         else setNotice("ACCOUNT CREATED. CHECK YOUR EMAIL TO CONFIRM, THEN LOG IN.");
       } else {
-        const { error: loginError } = await supabase.auth.signInWithPassword({ email: email.trim(), password });
+        const { data: loginData, error: loginError } = await supabase.auth.signInWithPassword({ email: submittedEmail, password: submittedPassword });
+        const errorCode = typeof loginError?.code === "string" && /^[a-zA-Z0-9_:-]{1,80}$/.test(loginError.code) ? loginError.code : "none";
+        console.info(`[auth-flow] password grant complete; user_present=${loginData.user ? "yes" : "no"}; session_present=${loginData.session ? "yes" : "no"}; error_code=${errorCode}; error_status=${loginError?.status ?? "none"}`);
         if (loginError) throw loginError;
+        console.info("[auth-flow] redirect requested; target=/dashboard");
         router.replace("/dashboard");
       }
       router.refresh();
@@ -74,13 +78,13 @@ function FormContent({ mode }: { mode: "login" | "signup" }) {
         <p className="dialog-kicker"><span className="kicker-square" /> PERSONAL TRACKING SYSTEM</p>
         <h1>{mode === "login" ? "LOG IN" : "CREATE ACCOUNT"}</h1>
         <p className="auth-intro">{mode === "login" ? "RESUME YOUR TRACKING SYSTEM." : "SET UP YOUR PERSONAL TRACKING SYSTEM."}</p>
-        {searchParams.get("setup") === "1" && <p className="auth-message">ADD YOUR SUPABASE PROJECT URL AND PUBLIC ANON KEY IN .ENV.LOCAL, THEN RESTART TRACK.</p>}
+        {searchParams.get("setup") === "1" && <p className="auth-message">ADD YOUR SUPABASE PROJECT URL AND PUBLISHABLE KEY IN .ENV.LOCAL, THEN RESTART TRACK.</p>}
         {searchParams.get("error") && <p className="auth-error">SIGN-IN LINK COULD NOT BE VERIFIED. TRY AGAIN.</p>}
         {!configured && searchParams.get("setup") !== "1" && <p className="auth-message">SUPABASE CONNECTION DETAILS ARE REQUIRED BEFORE ACCOUNT ACCESS IS AVAILABLE.</p>}
         <form className="auth-form" onSubmit={submit}>
-          <label className="form-field"><span>EMAIL</span><input autoComplete="email" onChange={(event) => setEmail(event.target.value)} required type="email" value={email} /></label>
-          <label className="form-field"><span>PASSWORD</span><input autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} onChange={(event) => setPassword(event.target.value)} required type="password" value={password} /></label>
-          {mode === "signup" && <label className="form-field"><span>CONFIRM PASSWORD</span><input autoComplete="new-password" minLength={8} onChange={(event) => setConfirmPassword(event.target.value)} required type="password" value={confirmPassword} /></label>}
+          <label className="form-field"><span>EMAIL</span><input autoComplete="email" name="email" required type="email" /></label>
+          <label className="form-field"><span>PASSWORD</span><input autoComplete={mode === "login" ? "current-password" : "new-password"} minLength={8} name="password" required type="password" /></label>
+          {mode === "signup" && <label className="form-field"><span>CONFIRM PASSWORD</span><input autoComplete="new-password" minLength={8} name="confirmPassword" required type="password" /></label>}
           {error && <p className="auth-error" role="alert">{error}</p>}
           {notice && <p className="auth-message" role="status">{notice}</p>}
           <button className="create-plan-button auth-submit" disabled={pending || !configured} type="submit">{pending ? "CONNECTING..." : mode === "login" ? "LOG IN" : "CREATE ACCOUNT"} <span aria-hidden="true">↗</span></button>

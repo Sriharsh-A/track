@@ -1,6 +1,11 @@
 "use client";
 
-import { useEffect, useState, type FormEvent } from "react";
+import { useEffect, useMemo, useState, type DragEvent, type FormEvent } from "react";
+import {
+  getLocalActivitySuggestions,
+  normalizeActivityName,
+  type ActivitySuggestion,
+} from "@/data/activity-suggestions";
 import { planTemplates } from "@/data/templates";
 import { addCalendarDays, formatCompactDate, localDateString } from "@/lib/plan-storage";
 import type { Activity, CreatePlanInput, PlanDuration } from "@/types/plan";
@@ -8,11 +13,6 @@ import type { Activity, CreatePlanInput, PlanDuration } from "@/types/plan";
 interface CreatePlanDialogProps {
   onClose: () => void;
   onCreate: (input: CreatePlanInput) => void | Promise<void>;
-}
-
-interface ActivitySuggestion {
-  name: string;
-  description: string;
 }
 
 const durations: PlanDuration[] = [7, 30, 90];
@@ -27,15 +27,21 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
   const [startDate, setStartDate] = useState(() => localDateString());
   const [activities, setActivities] = useState<Activity[]>([{ id: "draft-activity-1", name: "", order: 0 }]);
   const [selectedTemplate, setSelectedTemplate] = useState<string | null>(null);
-  const [suggestionsOpen, setSuggestionsOpen] = useState(false);
+  const [suggestionsOpen, setSuggestionsOpen] = useState(true);
   const [goal, setGoal] = useState("");
   const [suggestions, setSuggestions] = useState<ActivitySuggestion[]>([]);
-  const [selectedSuggestions, setSelectedSuggestions] = useState<string[]>([]);
   const [isGenerating, setIsGenerating] = useState(false);
-  const [suggestionError, setSuggestionError] = useState("");
   const [suggestionNotice, setSuggestionNotice] = useState("");
+  const [suggestionSource, setSuggestionSource] = useState<"local" | "gemini">("local");
+  const [draggedActivityId, setDraggedActivityId] = useState<string | null>(null);
+  const [dropTarget, setDropTarget] = useState<{ id: string; after: boolean } | null>(null);
   const [saving, setSaving] = useState(false);
   const [saveError, setSaveError] = useState("");
+  const localSuggestions = useMemo(
+    () => getLocalActivitySuggestions(goal, activities.map((activity) => activity.name)),
+    [activities, goal],
+  );
+  const visibleSuggestions = suggestions.length ? suggestions : localSuggestions;
 
   useEffect(() => {
     function handleEscape(event: KeyboardEvent) {
@@ -72,15 +78,42 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
     });
   }
 
+  function reorderActivity(draggedId: string, targetId: string, after: boolean) {
+    setActivities((current) => {
+      const from = current.findIndex((activity) => activity.id === draggedId);
+      const target = current.findIndex((activity) => activity.id === targetId);
+      if (from < 0 || target < 0 || from === target) return current;
+      const next = [...current];
+      const [moved] = next.splice(from, 1);
+      const adjustedTarget = from < target ? target - 1 : target;
+      next.splice(adjustedTarget + (after ? 1 : 0), 0, moved);
+      return next.map((activity, order) => ({ ...activity, order }));
+    });
+  }
+
+  function handleActivityDragOver(event: DragEvent<HTMLDivElement>, activityId: string) {
+    if (!draggedActivityId || draggedActivityId === activityId) return;
+    event.preventDefault();
+    const rect = event.currentTarget.getBoundingClientRect();
+    setDropTarget({ id: activityId, after: event.clientY > rect.top + rect.height / 2 });
+  }
+
+  function addSuggestion(suggestion: ActivitySuggestion) {
+    const normalized = normalizeActivityName(suggestion.name);
+    if (!normalized || activities.some((activity) => normalizeActivityName(activity.name) === normalized)) return;
+    setActivities((current) => [...current, { id: draftActivityId(), name: suggestion.name, order: current.length }]);
+    setSelectedTemplate(null);
+    setSuggestionNotice("ACTIVITY ADDED TO PLAN");
+  }
+
   async function generateSuggestions() {
     const cleanGoal = goal.trim();
     if (!cleanGoal || isGenerating) return;
 
     setIsGenerating(true);
-    setSuggestionError("");
     setSuggestionNotice("");
     setSuggestions([]);
-    setSelectedSuggestions([]);
+    setSuggestionSource("local");
     try {
       const response = await fetch("/api/suggestions", {
         method: "POST",
@@ -92,45 +125,29 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
         }),
       });
       const payload = await response.json() as { suggestions?: ActivitySuggestion[]; error?: string };
-      if (!response.ok || !Array.isArray(payload.suggestions)) {
-        throw new Error(payload.error || "COULD NOT GENERATE SUGGESTIONS");
-      }
-      setSuggestions(payload.suggestions);
+      if (!response.ok || !Array.isArray(payload.suggestions) || payload.suggestions.length === 0) throw new Error("FALLBACK");
+      setSuggestions(payload.suggestions.slice(0, 8));
+      setSuggestionSource("gemini");
+      setSuggestionNotice("GEMINI SUGGESTIONS · SELECT EACH ACTIVITY TO ADD");
     } catch {
-      setSuggestionError("COULD NOT GENERATE SUGGESTIONS");
+      setSuggestions([]);
+      setSuggestionSource("local");
+      setSuggestionNotice(localSuggestions.length ? "AI UNAVAILABLE · LOCAL SUGGESTIONS SHOWN" : "NO MATCHES YET · TRY A DIFFERENT GOAL");
     } finally {
       setIsGenerating(false);
     }
   }
 
-  function addSelectedSuggestions() {
-    const existing = new Set(activities.map((activity) => normalizeActivity(activity.name)).filter(Boolean));
-    const selected = suggestions.filter((suggestion) => selectedSuggestions.includes(suggestion.name));
-    const unique = selected.filter((suggestion) => {
-      const normalized = normalizeActivity(suggestion.name);
-      if (!normalized || existing.has(normalized)) return false;
-      existing.add(normalized);
-      return true;
-    });
-    if (unique.length) {
-      setActivities((current) => [
-        ...current,
-        ...unique.map((suggestion, index) => ({ id: draftActivityId(), name: suggestion.name, order: current.length + index })),
-      ]);
-      setSelectedTemplate(null);
-    }
-    setSelectedSuggestions([]);
-    setSuggestionNotice(unique.length ? `${unique.length} ACTIVITIES ADDED TO PLAN` : "SELECT AT LEAST ONE NEW ACTIVITY");
-  }
-
-  function toggleSuggestion(name: string) {
-    setSelectedSuggestions((current) => current.includes(name) ? current.filter((item) => item !== name) : [...current, name]);
-  }
-
   async function submit(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
     if (saving) return;
-    const cleanActivities = activities.filter((activity) => activity.name.trim()).map((activity, order) => ({ ...activity, name: activity.name.trim(), order }));
+    const seen = new Set<string>();
+    const cleanActivities = activities.filter((activity) => {
+      const normalized = normalizeActivityName(activity.name);
+      if (!normalized || seen.has(normalized)) return false;
+      seen.add(normalized);
+      return true;
+    }).map((activity, order) => ({ ...activity, name: activity.name.trim(), order }));
     if (!name.trim() || cleanActivities.length === 0) return;
     setSaving(true);
     setSaveError("");
@@ -188,7 +205,7 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
           <section className="ai-suggestions-module">
             <button aria-expanded={suggestionsOpen} className="ai-suggestions-toggle" onClick={() => setSuggestionsOpen((open) => !open)} type="button">
               <span className="ai-suggestions-symbol" aria-hidden="true">✦</span>
-              <span>AI SUGGEST ACTIVITIES</span>
+              <span>SUGGESTED ACTIVITIES</span>
               <span className="ai-suggestions-duration">{duration} DAYS</span>
               <span className="ai-suggestions-chevron" aria-hidden="true">{suggestionsOpen ? "−" : "+"}</span>
             </button>
@@ -197,28 +214,30 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
                 <div className="ai-suggestions-form">
                   <label className="form-field ai-goal-field">
                     <span>WHAT ARE YOU TRYING TO ACHIEVE?</span>
-                    <input maxLength={240} onChange={(event) => { setGoal(event.target.value); setSuggestionError(""); }} placeholder="e.g. Build a consistent morning routine" value={goal} />
+                    <input maxLength={240} onChange={(event) => { setGoal(event.target.value); setSuggestions([]); setSuggestionSource("local"); setSuggestionNotice(""); }} placeholder="e.g. Build a consistent morning routine" value={goal} />
                   </label>
                   <button className="ai-generate-button" disabled={!goal.trim() || isGenerating} onClick={() => void generateSuggestions()} type="button">
-                    {isGenerating ? "GENERATING..." : suggestions.length ? "REGENERATE" : "GENERATE SUGGESTIONS"}
+                    {isGenerating ? "ASKING GEMINI..." : suggestions.length ? "REFRESH WITH GEMINI" : "ASK GEMINI"}
                     {!isGenerating && <span aria-hidden="true">↗</span>}
                   </button>
                 </div>
-                {suggestionError && <p className="ai-suggestion-error" role="alert"><span>!</span> {suggestionError}<span className="ai-error-retry"> Try again.</span></p>}
                 {suggestionNotice && <p aria-live="polite" className="ai-suggestion-notice">{suggestionNotice}</p>}
-                {suggestions.length > 0 && (
+                {visibleSuggestions.length > 0 && (
                   <div className="ai-suggestion-results">
-                    <div className="ai-results-heading"><span>SUGGESTED ACTIVITIES</span><span>{suggestions.length} OPTIONS</span></div>
-                    {suggestions.map((suggestion) => (
-                      <label className="ai-suggestion-option" key={suggestion.name}>
-                        <input checked={selectedSuggestions.includes(suggestion.name)} onChange={() => toggleSuggestion(suggestion.name)} type="checkbox" />
-                        <span className="ai-suggestion-check" aria-hidden="true">✓</span>
-                        <span className="ai-suggestion-copy"><strong>{suggestion.name}</strong>{suggestion.description && <small>{suggestion.description}</small>}</span>
-                      </label>
-                    ))}
-                    <button className="ai-add-selected" onClick={addSelectedSuggestions} type="button">ADD SELECTED <span aria-hidden="true">↗</span></button>
+                    <div className="ai-results-heading"><span>BASED ON YOUR GOAL</span><span>{suggestionSource === "gemini" ? "GEMINI" : "LOCAL MATCHES"} · {visibleSuggestions.length} OPTIONS</span></div>
+                    {visibleSuggestions.map((suggestion) => {
+                      const alreadyAdded = activities.some((activity) => normalizeActivityName(activity.name) === normalizeActivityName(suggestion.name));
+                      return (
+                        <div className="ai-suggestion-option" key={suggestion.name}>
+                          <span className="ai-suggestion-check" aria-hidden="true">+</span>
+                          <span className="ai-suggestion-copy"><strong>{suggestion.name}</strong>{suggestion.description && <small>{suggestion.description}</small>}</span>
+                          <button aria-label={`${alreadyAdded ? "Already added" : "Add"} ${suggestion.name}`} className="suggestion-add-button" disabled={alreadyAdded} onClick={() => addSuggestion(suggestion)} type="button">{alreadyAdded ? "ADDED" : "+ ADD"}</button>
+                        </div>
+                      );
+})}
                   </div>
                 )}
+                {!goal.trim() && <p className="suggestion-empty-hint">Enter a goal to see trackable activity ideas.</p>}
               </div>
             )}
           </section>
@@ -229,8 +248,27 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
           </div>
           <div aria-label="Plan activities" className="activity-editor-list">
             {activities.map((activity, index) => (
-              <div className="activity-editor-row" key={activity.id}>
+              <div
+                className={`activity-editor-row${draggedActivityId === activity.id ? " is-dragging" : ""}${dropTarget?.id === activity.id ? dropTarget.after ? " drop-after" : " drop-before" : ""}`}
+                key={activity.id}
+                onDragOver={(event) => handleActivityDragOver(event, activity.id)}
+                onDrop={(event) => {
+                  event.preventDefault();
+                  if (draggedActivityId) reorderActivity(draggedActivityId, activity.id, dropTarget?.id === activity.id ? Boolean(dropTarget.after) : false);
+                  setDraggedActivityId(null);
+                  setDropTarget(null);
+                }}
+              >
                 <span aria-hidden="true" className="activity-index">{String(index + 1).padStart(2, "0")}</span>
+                <button
+                  aria-label={`Drag to reorder activity ${index + 1}; use the up and down buttons for keyboard reordering`}
+                  className="activity-drag-handle"
+                  draggable
+                  onDragEnd={() => { setDraggedActivityId(null); setDropTarget(null); }}
+                  onDragStart={(event) => { event.dataTransfer.effectAllowed = "move"; event.dataTransfer.setData("text/plain", activity.id); setDraggedActivityId(activity.id); }}
+                  title="Drag to reorder"
+                  type="button"
+                >≡</button>
                 <input aria-label={`Activity ${index + 1}`} maxLength={80} onChange={(event) => updateActivity(activity.id, event.target.value)} placeholder="Activity name" value={activity.name} />
                 <span className="activity-order-controls"><button aria-label={`Move activity ${index + 1} up`} disabled={index === 0} onClick={() => moveActivity(index, -1)} type="button">↑</button><button aria-label={`Move activity ${index + 1} down`} disabled={index === activities.length - 1} onClick={() => moveActivity(index, 1)} type="button">↓</button></span>
                 <button aria-label={`Remove ${activity.name || `activity ${index + 1}`}`} className="remove-activity-button" onClick={() => removeActivity(activity.id)} type="button">×</button>
@@ -250,6 +288,3 @@ export function CreatePlanDialog({ onClose, onCreate }: CreatePlanDialogProps) {
   );
 }
 
-function normalizeActivity(name: string) {
-  return name.toLocaleLowerCase().normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "").trim();
-}

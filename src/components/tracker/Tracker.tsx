@@ -1,12 +1,12 @@
 "use client";
 
-import { useCallback, useMemo, useState, type KeyboardEvent } from "react";
+import { useCallback, useEffect, useMemo, useState, type KeyboardEvent } from "react";
 import { useRouter } from "next/navigation";
 import Link from "next/link";
 import { AppHeader } from "@/components/AppHeader";
 import { CreatePlanDialog } from "@/components/plans/CreatePlanDialog";
 import { usePlans } from "@/components/plans/usePlans";
-import { addCalendarDays, formatCompactDate, getPlanTiming, isFuturePlanDay } from "@/lib/plan-storage";
+import { addCalendarDays, canEditPlanDay, formatCompactDate, formatDayDate, getElapsedPlanDays, getPlanStartDate, getPlanTiming, isFuturePlanDay, localDateString } from "@/lib/plan-storage";
 import type { Plan } from "@/types/plan";
 import { ActivityRow } from "./ActivityRow";
 import { StatsBar } from "./StatsBar";
@@ -14,6 +14,7 @@ import { TrackerHeader } from "./TrackerHeader";
 import type { CellState, SelectedCell } from "./types";
 
 function countStreak(plan: Plan, throughDay: number): number {
+  if (plan.activities.length === 0) return 0;
   const complete = new Set(plan.entries.filter((entry) => entry.status === "complete").map((entry) => `${entry.activityId}:${entry.day}`));
   let streak = 0;
   for (let day = throughDay; day >= 1; day--) {
@@ -32,7 +33,15 @@ export function Tracker({ planId }: { planId: string }) {
   const entries = plan?.entries ?? [];
   const timing = plan ? getPlanTiming(plan) : null;
   const currentDay = timing?.currentDay ?? null;
-  const futureDays = useMemo(() => new Set(plan ? Array.from({ length: duration }, (_, index) => index + 1).filter((day) => isFuturePlanDay(plan, day)) : []), [duration, plan]);
+  const [todayDate, setTodayDate] = useState(() => localDateString());
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const nextDate = localDateString();
+      setTodayDate((current) => current === nextDate ? current : nextDate);
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+  const futureDays = useMemo(() => new Set(plan ? Array.from({ length: duration }, (_, index) => index + 1).filter((day) => isFuturePlanDay(plan, day)) : []), [duration, plan, todayDate]);
   const [selected, setSelected] = useState<SelectedCell>({ activityIndex: 0, dayIndex: 0 });
   const [createOpen, setCreateOpen] = useState(false);
   const [revealedDay, setRevealedDay] = useState<number | null>(null);
@@ -43,6 +52,8 @@ export function Tracker({ planId }: { planId: string }) {
 
   const setCell = useCallback((activityId: string, day: number, nextState: CellState) => {
     if (!plan) return;
+    // Check at mutation time as well as presenting future cells as locked.
+    if (!canEditPlanDay(plan, day)) return;
     updatePlan(plan.id, (current) => {
       const withoutCell = current.entries.filter((entry) => entry.activityId !== activityId || entry.day !== day);
       return {
@@ -60,8 +71,10 @@ export function Tracker({ planId }: { planId: string }) {
 
   const stats = useMemo(() => {
     const todayCompleted = currentDay === null ? 0 : activities.filter((activity) => stateFor(activity.id, currentDay) === "complete").length;
-    const completedCells = entries.filter((entry) => entry.status === "complete").length;
-    const totalCells = activities.length * duration;
+    const elapsedDays = plan ? getElapsedPlanDays(plan) : 0;
+    const validActivityIds = new Set(activities.map((activity) => activity.id));
+    const completedCells = entries.filter((entry) => entry.status === "complete" && entry.day <= elapsedDays && validActivityIds.has(entry.activityId)).length;
+    const totalCells = activities.length * elapsedDays;
     return {
       todayCompleted,
       overallPercent: totalCells ? Math.round((completedCells / totalCells) * 100) : 0,
@@ -150,11 +163,12 @@ export function Tracker({ planId }: { planId: string }) {
                   <th scope="col">ACTIVITY <span aria-hidden="true">/</span> DAY</th>
                   {Array.from({ length: duration }, (_, index) => {
                     const day = index + 1;
-                    const date = addCalendarDays(plan.startDate, day - 1);
+                    const date = addCalendarDays(getPlanStartDate(plan), day - 1);
                     const today = day === currentDay;
                     return <th className={`${today ? "day-today" : ""}${futureDays.has(day) ? " day-future-header" : ""}`} key={day} scope="col">
                       <button aria-label={`Day ${day}, ${formatCompactDate(date)}`} className="day-date-button" onClick={() => setRevealedDay((value) => value === day ? null : day)} title={formatCompactDate(date)} type="button">
                         <span className="day-label">{today && <span className="day-indicator" />} {String(day).padStart(2, "0")}</span>
+                        <span className="day-date-caption">{formatDayDate(date)}</span>
                       </button>
                       {revealedDay === day && <span aria-live="polite" className="day-date-tooltip">{formatCompactDate(date)}</span>}
                     </th>;

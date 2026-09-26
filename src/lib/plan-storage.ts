@@ -1,6 +1,8 @@
 import type { CreatePlanInput, EntryStatus, Plan, PlanDuration } from "@/types/plan";
 
 export const PLAN_STORAGE_KEY = "track:plans:v1";
+// TRACK plan dates use India Standard Time consistently in the UI and database policies.
+export const TRACK_TIME_ZONE = "Asia/Kolkata";
 
 const durations: PlanDuration[] = [7, 30, 90];
 const statuses: EntryStatus[] = ["empty", "complete", "incomplete"];
@@ -55,9 +57,16 @@ export function createPlan(input: CreatePlanInput): Plan {
 }
 
 export function localDateString(date = new Date()): string {
-  const year = date.getFullYear();
-  const month = String(date.getMonth() + 1).padStart(2, "0");
-  const day = String(date.getDate()).padStart(2, "0");
+  const parts = new Intl.DateTimeFormat("en-CA", {
+    timeZone: TRACK_TIME_ZONE,
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+  }).formatToParts(date);
+  const part = (type: "year" | "month" | "day") => parts.find((item) => item.type === type)?.value ?? "00";
+  const year = part("year");
+  const month = part("month");
+  const day = part("day");
   return `${year}-${month}-${day}`;
 }
 
@@ -96,6 +105,11 @@ export function formatCompactDate(date: string): string {
   return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString("en-US", { month: "short", day: "2-digit", year: "numeric", timeZone: "UTC" }).toUpperCase();
 }
 
+export function formatDayDate(date: string): string {
+  const [year, month, day] = date.split("-").map(Number);
+  return new Date(Date.UTC(year, month - 1, day)).toLocaleDateString("en-US", { month: "short", day: "2-digit", timeZone: "UTC" }).toUpperCase();
+}
+
 export function formatPlanDateRange(plan: Pick<Plan, "startDate" | "createdAt" | "duration">): string {
   const { startDate, endDate } = getPlanTiming(plan);
   const start = new Date(`${startDate}T00:00:00.000Z`);
@@ -113,9 +127,21 @@ export function isFuturePlanDay(plan: Pick<Plan, "startDate" | "createdAt">, day
   return calendarDay(date) > calendarDay(localDateString(now));
 }
 
+export function canEditPlanDay(plan: Pick<Plan, "startDate" | "createdAt">, day: number, now = new Date()): boolean {
+  return !isFuturePlanDay(plan, day, now);
+}
+
+export function getElapsedPlanDays(plan: Pick<Plan, "startDate" | "createdAt" | "duration">, now = new Date()): number {
+  const timing = getPlanTiming(plan, now);
+  if (timing.status === "upcoming") return 0;
+  return timing.status === "active" ? timing.currentDay ?? 0 : plan.duration;
+}
+
 export function getCompletionPercent(plan: Plan): number {
-  const total = plan.activities.length * plan.duration;
+  const elapsedDays = getElapsedPlanDays(plan);
+  const total = plan.activities.length * elapsedDays;
   if (total === 0) return 0;
-  const complete = plan.entries.filter((entry) => entry.status === "complete").length;
+  const activityIds = new Set(plan.activities.map((activity) => activity.id));
+  const complete = plan.entries.filter((entry) => entry.status === "complete" && entry.day <= elapsedDays && activityIds.has(entry.activityId)).length;
   return Math.round((complete / total) * 100);
 }

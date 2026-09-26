@@ -22,12 +22,19 @@ export async function middleware(request: NextRequest) {
       },
     },
   });
-  const { data: { user } } = await supabase.auth.getUser();
+  const { data: { user }, error: authError } = await supabase.auth.getUser();
   const path = request.nextUrl.pathname;
-  const privatePath = path === "/" || path.startsWith("/dashboard") || path.startsWith("/tracker");
+  const route = path.startsWith("/dashboard") ? "dashboard" : path.startsWith("/tracker") ? "tracker" : path;
+  const errorCode = typeof authError?.code === "string" && /^[a-zA-Z0-9_:-]{1,80}$/.test(authError.code) ? authError.code : "none";
+  const cookieNames = request.cookies.getAll().map(({ name }) => name);
+  const sessionCookiePresent = cookieNames.some((name) => /^sb-.+-auth-token(?:\.\d+)?$/.test(name));
+  const codeVerifierCookiePresent = cookieNames.some((name) => name.endsWith("-auth-token-code-verifier"));
+  console.info(`[auth-flow] middleware route=${route}; user_present=${user ? "yes" : "no"}; session_cookie_present=${sessionCookiePresent ? "yes" : "no"}; code_verifier_cookie_present=${codeVerifierCookiePresent ? "yes" : "no"}; error_code=${errorCode}; error_status=${authError?.status ?? "none"}`);
+  const privatePath = path.startsWith("/dashboard") || path.startsWith("/tracker");
   const authPath = path === "/login" || path === "/signup";
 
   if (privatePath && !user) return NextResponse.redirect(new URL("/login", request.url));
+  if (path === "/" && user) return NextResponse.redirect(new URL("/dashboard", request.url));
   if (authPath && user) return NextResponse.redirect(new URL("/dashboard", request.url));
   return response;
 }

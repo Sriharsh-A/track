@@ -20,9 +20,10 @@ export function TrackerCell({ activity, day, future, state, selected, activityIn
   return (
     <td className={future ? "day-future" : undefined}>
       <button
-        aria-label={`${activity.name}, day ${day}: ${status}`}
+        aria-disabled={future || undefined}
+        aria-label={`${activity.name}, day ${day}: ${status}${future ? ", upcoming and locked" : ""}`}
         aria-pressed={state === "complete"}
-        className={`tracker-button${state === "complete" ? " is-complete" : state === "incomplete" ? " is-incomplete" : ""}${selected ? " is-selected" : ""}`}
+        className={`tracker-button${state === "complete" ? " is-complete" : state === "incomplete" ? " is-incomplete" : ""}${selected ? " is-selected" : ""}${future ? " is-future" : ""}`}
         data-cell="true"
         data-state={state}
         onClick={() => { onSelect({ activityIndex, dayIndex }); onCycle(activity.id, day); }}

@@ -12,7 +12,7 @@ interface AppHeaderProps {
 export function AppHeader({ onNewPlan, active }: AppHeaderProps) {
   const router = useRouter();
   async function logout() {
-    try { await createClient().auth.signOut(); } finally { router.replace("/login"); router.refresh(); }
+    try { await createClient().auth.signOut(); } finally { router.replace("/"); router.refresh(); }
   }
 
   return (

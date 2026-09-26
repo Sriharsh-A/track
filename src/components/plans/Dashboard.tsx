@@ -1,13 +1,13 @@
 "use client";
 
-import { useMemo, useState } from "react";
+import { useEffect, useMemo, useState } from "react";
 import Link from "next/link";
 import { AppHeader } from "@/components/AppHeader";
 import { CreatePlanDialog } from "./CreatePlanDialog";
 import { DeletePlanDialog } from "./DeletePlanDialog";
 import { EditPlanDialog } from "./EditPlanDialog";
 import { usePlans } from "./usePlans";
-import { getCompletionPercent, getPlanTiming } from "@/lib/plan-storage";
+import { formatPlanDateRange, getCompletionPercent, getPlanTiming, localDateString } from "@/lib/plan-storage";
 import type { CreatePlanInput, Plan } from "@/types/plan";
 
 function sortPlans(plans: Plan[]) {
@@ -31,7 +31,18 @@ function PlanModule({ plan, onEdit, onArchive, onDelete, archivedView }: {
   const timing = getPlanTiming(plan);
   const status = timing.status === "upcoming"
     ? `STARTS IN ${timing.daysUntilStart} ${timing.daysUntilStart === 1 ? "DAY" : "DAYS"}`
-    : timing.status === "complete" ? "PLAN COMPLETE" : `DAY ${String(timing.currentDay).padStart(2, "0")} / ${plan.duration}`;
+    : timing.status === "complete" ? "PLAN ENDED" : `DAY ${String(timing.currentDay).padStart(2, "0")} / ${plan.duration}`;
+  const completedToday = timing.currentDay === null
+    ? null
+    : plan.entries.filter((entry) => entry.day === timing.currentDay && entry.status === "complete" && plan.activities.some((activity) => activity.id === entry.activityId)).length;
+  const completeByActivityAndDay = new Set(plan.entries.filter((entry) => entry.status === "complete").map((entry) => `${entry.activityId}:${entry.day}`));
+  let streak = 0;
+  if (plan.activities.length > 0) {
+    for (let day = (timing.status === "upcoming" ? 0 : timing.currentDay ?? plan.duration); day >= 1; day -= 1) {
+      if (!plan.activities.every((activity) => completeByActivityAndDay.has(`${activity.id}:${day}`))) break;
+      streak += 1;
+    }
+  }
 
   return (
     <article className="plan-module managed-plan-module">
@@ -39,8 +50,14 @@ function PlanModule({ plan, onEdit, onArchive, onDelete, archivedView }: {
         <div className="plan-module-top"><span className="module-number">PLAN / {plan.id.slice(0, 4).toUpperCase()}</span><span className="module-duration">{plan.duration} DAYS</span></div>
         <h2 className="plan-module-title">{plan.name}</h2>
         <div className="plan-module-meta"><span>{status}</span><span>{plan.activities.length} ACTIVITIES</span></div>
+        <p className="plan-module-dates">{formatPlanDateRange(plan)}</p>
+        <div className="plan-readouts" aria-label="Plan progress statistics">
+          <div><span>TODAY</span><strong>{plan.activities.length === 0 ? "0 / 0" : `${completedToday ?? "—"} / ${plan.activities.length}`}</strong></div>
+          <div><span>STREAK</span><strong>{streak} <small>{streak === 1 ? "DAY" : "DAYS"}</small></strong></div>
+          <div><span>OVERALL</span><strong>{percent}<small>%</small></strong></div>
+        </div>
         <div aria-label={`${percent}% complete`} className="plan-progress"><span style={{ width: `${percent}%` }} /></div>
-        <div className="plan-module-bottom"><span className="plan-percent">{percent}<span>%</span></span><span className="open-tracker-label">OPEN TRACKER <span aria-hidden="true">↗</span></span></div>
+        <div className="plan-module-bottom"><span className="open-tracker-label">OPEN TRACKER <span aria-hidden="true">↗</span></span></div>
       </Link>
       <div className="plan-management-actions">
         {!archivedView && <button aria-label={`Edit ${plan.name}`} onClick={() => onEdit(plan)} type="button">EDIT</button>}
@@ -57,7 +74,15 @@ export function Dashboard() {
   const [editing, setEditing] = useState<Plan | null>(null);
   const [deleting, setDeleting] = useState<Plan | null>(null);
   const [archivedView, setArchivedView] = useState(false);
-  const visiblePlans = useMemo(() => sortPlans(plans.filter((plan) => plan.archived === archivedView)), [plans, archivedView]);
+  const [todayDate, setTodayDate] = useState(() => localDateString());
+  useEffect(() => {
+    const interval = window.setInterval(() => {
+      const nextDate = localDateString();
+      setTodayDate((current) => current === nextDate ? current : nextDate);
+    }, 30_000);
+    return () => window.clearInterval(interval);
+  }, []);
+  const visiblePlans = useMemo(() => sortPlans(plans.filter((plan) => plan.archived === archivedView)), [plans, archivedView, todayDate]);
   const activeCount = plans.filter((plan) => !plan.archived).length;
 
   async function create(input: CreatePlanInput) {
